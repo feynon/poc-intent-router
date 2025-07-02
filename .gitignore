@@ -1,0 +1,33 @@
+# Node/Bun dependencies
+node_modules/
+bun.lock
+
+# Environment files
+.env
+.env.*
+
+# DuckDB database files
+db.sqlite
+database/*.db
+database/*.sqlite
+
+# Logs
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+
+# VSCode settings
+.vscode/
+
+# Ollama model cache (if any)
+.ollama/
+
+# Misc
+*.swp
+*.swo 
