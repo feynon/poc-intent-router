@@ -4,6 +4,8 @@
 >
 > This project is a proof-of-concept (POC) for agentic intent routing with a dual-LLM security model. It is meant for inspiration, learning, and reference only—not for real-world or production use. Expect rough edges, incomplete features, and breaking changes. Use at your own risk!
 
+For context on the design rationale behind this project, see my Patreon research post: [A Case for Client-Side Intent Routing](https://www.patreon.com/posts/case-for-client-131833840).
+
 ---
 
 ## Overview
