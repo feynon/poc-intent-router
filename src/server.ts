@@ -3,6 +3,7 @@ import { PlannerAgent } from "../agents/planner.js";
 import { MockPlannerAgent } from "../agents/mock-planner.js";
 import { PolicyEngine } from "../agents/policy.js";
 import { ExecutorAgent } from "../agents/executor.js";
+import { MCPAgent, defaultMCPConfig } from "../agents/mcp-agent.js";
 import { 
   Prompt, 
   Plan, 
@@ -22,11 +23,16 @@ export class AgentServer {
   private planner: PlannerAgent | MockPlannerAgent;
   private policy: PolicyEngine;
   private executor: ExecutorAgent;
+  private mcpAgent: MCPAgent;
   private port: number;
 
   constructor(port: number = 3000) {
     this.port = port;
     this.db = new Database(":memory:");
+    
+    // Initialize MCP agent
+    this.mcpAgent = new MCPAgent(defaultMCPConfig);
+    
     // Use mock planner for demo since Ollama models are crashing
     const useMockPlanner = process.env.USE_MOCK_PLANNER === "true" || true; // Force mock for demo
     this.planner = useMockPlanner 
@@ -44,7 +50,8 @@ export class AgentServer {
     
     this.executor = new ExecutorAgent(
       anthropicKey, 
-      process.env.EXECUTOR_MODEL || "claude-3-5-sonnet-20241022"
+      process.env.EXECUTOR_MODEL || "claude-3-5-sonnet-20241022",
+      this.mcpAgent
     );
     this.initializeDatabase();
     this.initializeCapabilities();
@@ -117,9 +124,18 @@ export class AgentServer {
     for (const capability of defaultCapabilities) {
       this.policy.addCapability(capability);
     }
+
+    // Add MCP capabilities
+    const mcpCapabilities = this.mcpAgent.getRequiredCapabilities();
+    for (const capability of mcpCapabilities) {
+      this.policy.addCapability(capability);
+    }
   }
 
   async start(): Promise<void> {
+    // Initialize MCP agent
+    await this.mcpAgent.initialize();
+    
     const server = Bun.serve({
       port: this.port,
       fetch: this.handleRequest.bind(this),
@@ -176,6 +192,18 @@ export class AgentServer {
       if (path === "/events" && method === "GET") {
         return this.handleGetEvents();
       }
+      
+      if (path === "/mcp/servers" && method === "GET") {
+        return this.handleGetMCPServers();
+      }
+      
+      if (path === "/mcp/servers" && method === "POST") {
+        return this.handleAddMCPServer(request);
+      }
+      
+      if (path === "/mcp/tools" && method === "GET") {
+        return this.handleGetMCPTools();
+      }
 
       return new Response("Not Found", { 
         status: 404, 
@@ -196,6 +224,7 @@ export class AgentServer {
   private async handleHealthCheck(): Promise<Response> {
     const plannerHealthy = await this.planner.healthCheck();
     const executorHealthy = await this.executor.healthCheck();
+    const mcpHealthy = await this.mcpAgent.healthCheck();
 
     const health = {
       status: "ok",
@@ -203,8 +232,17 @@ export class AgentServer {
       services: {
         planner: plannerHealthy ? "healthy" : "unhealthy",
         executor: executorHealthy ? "healthy" : "unhealthy",
+        mcp: mcpHealthy ? "healthy" : "unhealthy",
         database: "healthy", // DuckDB is in-memory, assume healthy
       },
+      mcp: {
+        servers: this.mcpAgent.getServerNames(),
+        tools: this.mcpAgent.getMCPTools().map(tool => ({
+          name: tool.name,
+          server: tool.server_name,
+          description: tool.description
+        }))
+      }
     };
 
     return new Response(JSON.stringify(health), {
@@ -396,6 +434,52 @@ export class AgentServer {
     } catch (err) {
       throw new Error(`Failed to store plan: ${err}`);
     }
+  }
+
+  private async handleGetMCPServers(): Promise<Response> {
+    const servers = this.mcpAgent.getServerNames();
+    return new Response(JSON.stringify({ servers }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  private async handleAddMCPServer(request: Request): Promise<Response> {
+    try {
+      const body = await request.json();
+      const { name, command, args, env } = body;
+
+      if (!name || !command || !args) {
+        return new Response(JSON.stringify({ 
+          error: "Missing required fields: name, command, args" 
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      await this.mcpAgent.addServer({ name, command, args, env });
+      
+      return new Response(JSON.stringify({ 
+        success: true, 
+        message: `MCP server ${name} added successfully` 
+      }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ 
+        error: error instanceof Error ? error.message : "Failed to add MCP server" 
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  private async handleGetMCPTools(): Promise<Response> {
+    const tools = this.mcpAgent.getMCPTools();
+    return new Response(JSON.stringify({ tools }), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }
 

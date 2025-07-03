@@ -4,6 +4,23 @@
 
 ---
 
+## Prompt Engineering with Priompt
+
+This implementation integrates **[Priompt](https://github.com/anysphere/priompt)** for intelligent prompt composition with priority-based token inclusion across both planning and execution agents.
+
+### Key Benefits
+- **Dynamic token management**: Automatically includes maximum relevant context within token limits
+- **Priority-based inclusion**: Critical instructions preserved while less important context may be truncated
+- **Structured prompts**: Uses `SystemMessage` and `UserMessage` components for clear organization
+- **Context history support**: Planner accepts variable-priority context history for better planning decisions
+
+### Implementation Details
+- **Planner Agent**: 4000 token limit with priority-ordered prompt elements
+- **Executor Agent**: 8000 token limit with structured execution prompts
+- **Context History**: Optional `contextHistory` array in `PlannerRequest` with custom priorities
+
+---
+
 ## Data Model Layers
 
 | Layer                  | Primary nodes     | Key edges / indexes                          | Note                                                 |
@@ -31,7 +48,7 @@ ollama pull qwen:3-4b     # official Ollama tag
 # Project bootstrap
 bun create agentic‑mvp ./my‑workspace && cd my‑workspace
 cp docs/AGENTS.md .       # this file
-bun install               # installs duckdb, @anthropic-ai/sdk
+bun install               # installs duckdb, @anthropic-ai/sdk, @anysphere/priompt
 cp .env.example .env      # add your ANTHROPIC_API_KEY
 bun run dev               # starts HTTP server on :3000
 ```
@@ -77,18 +94,48 @@ POST http://localhost:11434/api/generate
 }
 ```
 
-### 3.2 Prompt template (TypeScript string)
+### 3.2 Prompt composition (Priompt-based)
 
 ```ts
-export const PLANNER_TEMPLATE = String.raw`
-You are a deterministic planning LLM inside an "agentic notebook".
-Output **only** JSON ‑ an array of step objects with fields:
+function PlannerPrompt(props: PlannerPromptProps): PromptElement {
+  const elements: PromptElement[] = [];
+  
+  // Core system message with highest priority
+  elements.push(SystemMessage({
+    p: 10,
+    children: `You are a deterministic planning LLM inside an "agentic notebook".
+Output **only** JSON - an array of step objects with fields:
   op          // snake_case verb
-  args        // arbitrary JSON‑serialisable payload
+  args        // arbitrary JSON-serializable payload
   tool_caps   // array of required ToolCap IDs
   data_caps   // array of required DataCap IDs (for consumed entities)
   deps        // array of step indices this one depends on
-`;
+
+IMPORTANT: Always respond with a JSON array starting with [ and ending with ].`
+  }));
+  
+  // Available operations (priority 8)
+  elements.push(SystemMessage({
+    p: 8,
+    children: `Available operations:\n${availableOperations.map(op => `- ${op}`).join('\n')}`
+  }));
+  
+  // Context history with variable priorities
+  contextHistory.forEach((context) => {
+    elements.push(SystemMessage({
+      p: context.priority,
+      children: `Context: ${context.content}`
+    }));
+  });
+  
+  // User prompt with high priority
+  elements.push(UserMessage({
+    p: 9,
+    children: userPrompt
+  }));
+
+  return elements;
+}
 ```
 
 ### 3.3 JSON output schema (Zod)
@@ -151,15 +198,49 @@ If either assertion fails → raise `CAPABILITY_VIOLATION` → surface approval 
 * Chat completion via **Anthropic** (model configurable, default `claude-sonnet-4`)
 * Runs only **after** the Policy Engine green‑lights a step.
 * May create new *Entity* rows; they inherit union of consumed caps.
+* Uses **Priompt** for structured prompt composition with priority-based context inclusion.
 
 ```ts
 import { Anthropic } from "@anthropic-ai/sdk";
-const anthropic = new Anthropic();
+import { render, SystemMessage, UserMessage } from "@anysphere/priompt";
+
+private buildExecutorPrompt(step: Step, context: any): PromptElement {
+  const elements: PromptElement[] = [];
+  
+  // Core system instructions (highest priority)
+  elements.push(SystemMessage({
+    p: 10,
+    children: `You are an executor agent in an agentic system. 
+Use the provided tools to complete the operation efficiently and accurately.`
+  }));
+  
+  // Operation details (high priority)
+  elements.push(SystemMessage({
+    p: 9,
+    children: `Operation: ${step.op}\nArguments: ${JSON.stringify(step.args, null, 2)}`
+  }));
+  
+  // Context information (medium priority - may be truncated if large)
+  if (context && Object.keys(context).length > 0) {
+    elements.push(SystemMessage({
+      p: 6,
+      children: `Context: ${JSON.stringify(context, null, 2)}`
+    }));
+  }
+  
+  // Final instruction (high priority)
+  elements.push(UserMessage({
+    p: 8,
+    children: "Execute this operation and return the result."
+  }));
+  
+  return elements;
+}
 
 const res = await anthropic.messages.create({
   model: process.env.EXECUTOR_MODEL ?? "claude-sonnet-4",
   tools: [{/* JSON schema */}],
-  messages: buildMessages(planStep)
+  messages: [{ role: "user", content: render(promptElement, { tokenLimit: 8000 }).toString() }]
 });
 ```
 

@@ -86,9 +86,9 @@ bun run scripts/repl.ts
 
 ## Architecture
 
-- **Planner Agent**: Local LLM (Qwen-3-4B via Ollama) parses user prompts into deterministic JSON plans.
+- **Planner Agent**: Local LLM (Qwen-3-4B via Ollama) parses user prompts into deterministic JSON plans using **Priompt** for intelligent prompt composition.
 - **Policy Engine**: TypeScript in-proc, enforces CaMeL-style capability checks before every tool call.
-- **Executor Agent**: Remote LLM (Claude Sonnet 4 via Anthropic API) executes high-cost reasoning and tool commands.
+- **Executor Agent**: Remote LLM (Claude Sonnet 4 via Anthropic API) executes high-cost reasoning and tool commands with **Priompt**-optimized prompts.
 - **Embedding Agent**: (Planned) Uses OpenAI text-embedding-3-small for 384-dim vectors.
 - **Indexer**: DuckDB with HNSW and property-graph extensions for hybrid vector + symbolic search.
 
@@ -201,6 +201,57 @@ See `src/server.ts` for implementation details.
 
 ---
 
+## Prompt Engineering with Priompt
+
+This project uses **[Priompt](https://github.com/anysphere/priompt)** for intelligent prompt composition with priority-based token inclusion. Priompt allows the system to:
+
+- **Dynamically include/exclude prompt elements** based on priority when approaching token limits
+- **Preserve critical instructions** while allowing less important context to be truncated
+- **Optimize prompt efficiency** by including maximum relevant context within token constraints
+
+### Key Features
+
+- **Priority-based rendering**: Elements with higher `p` values (priority) are included first
+- **Automatic token management**: Stays within specified token limits while maximizing useful context
+- **Structured prompts**: Uses `SystemMessage` and `UserMessage` components for clear prompt structure
+
+### Usage Examples
+
+**Planner Agent**: Uses Priompt to structure planning prompts with:
+- Core instructions (priority 10)
+- User prompt (priority 9) 
+- Available operations (priority 8)
+- Tool capabilities (priority 6)
+- Context history (variable priority based on recency/importance)
+
+To pass context history to the planner, include a `contextHistory` array in your `PlannerRequest`:
+
+```typescript
+const request: PlannerRequest = {
+  prompt: "Create a summary of the meeting notes",
+  contextHistory: [
+    { content: "Previous meeting focused on Q2 goals", priority: 4 },
+    { content: "Recent project updates available", priority: 3 },
+    { content: "User prefers concise summaries", priority: 7 }
+  ]
+};
+```
+
+**Executor Agent**: Uses Priompt to optimize execution prompts with:
+- Core system instructions (priority 10)
+- Operation details (priority 9)
+- Final instruction (priority 8)
+- Tool capabilities (priority 7)
+- Context information (priority 6 - may be truncated for large contexts)
+
+### Configuration
+
+Both agents use configurable token limits:
+- **Planner**: 4000 tokens (adjustable for your local model)
+- **Executor**: 8000 tokens (adjustable for Claude's context limit)
+
+---
+
 ## Extending Capabilities
 
 Add new tool or data capabilities in `agents/capability-registry.ts` and ensure each tool implementation exports its required `tool_caps` for policy checks.
@@ -231,9 +282,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
-
-## Credits & Inspiration
-- [CLAUDE.MD](./CLAUDE.MD) — Full agent spec, design notes, and architecture
-- [Ollama](https://ollama.com/), [Anthropic](https://www.anthropic.com/), [DuckDB](https://duckdb.org/)
-- CaMeL, agentic notebooks, and the open-source agent ecosystem

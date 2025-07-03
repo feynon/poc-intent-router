@@ -1,0 +1,3 @@
+Hello from MCP filesystem server!
+This is a sample file for testing the MCP integration.
+You can read, write, and list files in this directory using MCP tools.

@@ -69,6 +69,7 @@ export type ViewSpec = z.infer<typeof ViewSpecSchema>;
 export interface PlannerRequest {
   prompt: string;
   context?: Record<string, unknown>;
+  contextHistory?: Array<{content: string; priority: number}>;
 }
 
 export interface PlannerResponse {

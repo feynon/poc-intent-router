@@ -1,5 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk";
 import { ExecutorRequest, ExecutorResponse, Step, Entity, Event } from "./types.js";
+import { MCPAgent } from "./mcp-agent.js";
+import { render, SystemMessage, UserMessage, PromptElement } from "@anysphere/priompt";
 
 export interface ToolDefinition {
   name: string;
@@ -13,15 +15,35 @@ export class ExecutorAgent {
   private anthropic: Anthropic;
   private tools: Map<string, ToolDefinition> = new Map();
   private model: string;
+  private mcpAgent?: MCPAgent;
 
-  constructor(apiKey: string, model: string = "claude-3-5-sonnet-20241022") {
+  constructor(apiKey: string, model: string = "claude-3-5-sonnet-20241022", mcpAgent?: MCPAgent) {
     this.anthropic = new Anthropic({ apiKey });
     this.model = model;
+    this.mcpAgent = mcpAgent;
     this.registerDefaultTools();
+    
+    // Register MCP tools if MCP agent is provided
+    if (this.mcpAgent) {
+      this.registerMCPTools();
+    }
   }
 
   registerTool(tool: ToolDefinition): void {
     this.tools.set(tool.name, tool);
+  }
+
+  private registerMCPTools(): void {
+    if (!this.mcpAgent) {
+      return;
+    }
+
+    const mcpTools = this.mcpAgent.getAvailableTools();
+    for (const tool of mcpTools) {
+      this.registerTool(tool);
+    }
+    
+    console.log(`📦 Registered ${mcpTools.length} MCP tools`);
   }
 
   getToolRegistry(): Record<string, string[]> {
@@ -73,22 +95,68 @@ export class ExecutorAgent {
   }
 
   private buildMessages(step: Step, context: any): Anthropic.MessageParam[] {
-    const systemPrompt = `You are an executor agent in an agentic system. 
-You will receive a step to execute with specific arguments and context.
-Use the provided tools to complete the operation.
-
-Operation: ${step.op}
-Arguments: ${JSON.stringify(step.args, null, 2)}
-Context: ${JSON.stringify(context, null, 2)}
-
-Execute this operation and return the result.`;
-
+    // Use Priompt to create a structured prompt with priority-based token inclusion
+    const promptElement = this.buildExecutorPrompt(step, context);
+    
+    const renderedPrompt = render(promptElement, {
+      tokenLimit: 8000 // Adjust based on model's context limit
+    });
+    
     return [
       {
         role: "user",
-        content: systemPrompt,
+        content: renderedPrompt.toString(),
       },
     ];
+  }
+
+  private buildExecutorPrompt(step: Step, context: any): PromptElement {
+    const elements: PromptElement[] = [];
+    
+    // Core system instructions (highest priority)
+    elements.push(SystemMessage({
+      p: 10,
+      children: `You are an executor agent in an agentic system. 
+You will receive a step to execute with specific arguments and context.
+Use the provided tools to complete the operation efficiently and accurately.`
+    }));
+    
+    // Operation details (high priority)
+    elements.push(SystemMessage({
+      p: 9,
+      children: `Operation: ${step.op}
+Arguments: ${JSON.stringify(step.args, null, 2)}`
+    }));
+    
+    // Context information (medium priority - may be truncated if context is large)
+    if (context && Object.keys(context).length > 0) {
+      elements.push(SystemMessage({
+        p: 6,
+        children: `Context: ${JSON.stringify(context, null, 2)}`
+      }));
+    }
+    
+    // Tool capabilities (medium priority)
+    elements.push(SystemMessage({
+      p: 7,
+      children: `Required capabilities for this operation: ${step.tool_caps.join(', ')}`
+    }));
+    
+    // Data capabilities (lower priority)
+    if (step.data_caps && step.data_caps.length > 0) {
+      elements.push(SystemMessage({
+        p: 5,
+        children: `Data capabilities: ${step.data_caps.join(', ')}`
+      }));
+    }
+    
+    // Final instruction (high priority)
+    elements.push(UserMessage({
+      p: 8,
+      children: "Execute this operation and return the result."
+    }));
+    
+    return elements;
   }
 
   private getClaudeTools(tools: ToolDefinition[]): Anthropic.Tool[] {
@@ -294,7 +362,11 @@ Execute this operation and return the result.`;
         max_tokens: 10,
         messages: [{ role: "user", content: "ping" }],
       });
-      return response.content.length > 0;
+      
+      const anthropicHealthy = response.content.length > 0;
+      const mcpHealthy = this.mcpAgent ? await this.mcpAgent.healthCheck() : true;
+      
+      return anthropicHealthy && mcpHealthy;
     } catch {
       return false;
     }

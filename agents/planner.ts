@@ -1,7 +1,46 @@
 import { PlannerRequest, PlannerResponse, Plan, Step, PlanSchema } from "./types.js";
+import { render, SystemMessage, UserMessage, PromptElement } from "@anysphere/priompt";
 
-const PLANNER_TEMPLATE = String.raw`
-You are a deterministic planning LLM inside an "agentic notebook".
+interface PlannerPromptProps {
+  userPrompt: string;
+  availableOperations?: string[];
+  availableToolCaps?: string[];
+  availableDataCaps?: string[];
+  contextHistory?: Array<{content: string; priority: number}>;
+}
+
+function PlannerPrompt(props: PlannerPromptProps): PromptElement {
+  const {
+    userPrompt,
+    availableOperations = [
+      "create_document: Create new documents or content",
+      "send_message: Send messages via email, chat, etc.",
+      "fetch_data: Retrieve information from various sources",
+      "search_entities: Search existing entities by content",
+      "analyze_content: Analyze or process content",
+      "transform_data: Transform data from one format to another"
+    ],
+    availableToolCaps = [
+      "READ_FILE: Read files from filesystem",
+      "WRITE_FILE: Write files to filesystem",
+      "SEND_EMAIL: Send email messages",
+      "HTTP_REQUEST: Make HTTP requests",
+      "SEARCH_WEB: Search the web"
+    ],
+    availableDataCaps = [
+      "share_with:public: Share data publicly",
+      "share_with:team: Share data with team members",
+      "pii_allowed: Handle personally identifiable information"
+    ],
+    contextHistory = []
+  } = props;
+
+  const elements: PromptElement[] = [];
+  
+  // Core system message with highest priority
+  elements.push(SystemMessage({
+    p: 10,
+    children: `You are a deterministic planning LLM inside an "agentic notebook".
 Output **only** JSON - an array of step objects with fields:
   op          // snake_case verb
   args        // arbitrary JSON-serializable payload
@@ -9,30 +48,44 @@ Output **only** JSON - an array of step objects with fields:
   data_caps   // array of required DataCap IDs (for consumed entities)
   deps        // array of step indices this one depends on
 
-Available operations:
-- create_document: Create new documents or content
-- send_message: Send messages via email, chat, etc.
-- fetch_data: Retrieve information from various sources
-- search_entities: Search existing entities by content
-- analyze_content: Analyze or process content
-- transform_data: Transform data from one format to another
-
-Available tool capabilities:
-- READ_FILE: Read files from filesystem
-- WRITE_FILE: Write files to filesystem
-- SEND_EMAIL: Send email messages
-- HTTP_REQUEST: Make HTTP requests
-- SEARCH_WEB: Search the web
-
-Available data capabilities:
-- share_with:public: Share data publicly
-- share_with:team: Share data with team members
-- pii_allowed: Handle personally identifiable information
-
-User prompt: {PROMPT}
-
 IMPORTANT: Always respond with a JSON array starting with [ and ending with ]. Even for a single step, wrap it in an array.
-Example: [{"op":"create_document","args":{"title":"Hello","content":"Hello World"},"tool_caps":["WRITE_FILE"],"data_caps":["share_with:public"],"deps":[]}]`;
+Example: [{"op":"create_document","args":{"title":"Hello","content":"Hello World"},"tool_caps":["WRITE_FILE"],"data_caps":["share_with:public"],"deps":[]}]`
+  }));
+  
+  // Available operations
+  elements.push(SystemMessage({
+    p: 8,
+    children: `Available operations:\n${availableOperations.map(op => `- ${op}`).join('\n')}`
+  }));
+  
+  // Available tool capabilities
+  elements.push(SystemMessage({
+    p: 6,
+    children: `Available tool capabilities:\n${availableToolCaps.map(cap => `- ${cap}`).join('\n')}`
+  }));
+  
+  // Available data capabilities
+  elements.push(SystemMessage({
+    p: 5,
+    children: `Available data capabilities:\n${availableDataCaps.map(cap => `- ${cap}`).join('\n')}`
+  }));
+  
+  // Context history with variable priorities
+  contextHistory.forEach((context, index) => {
+    elements.push(SystemMessage({
+      p: context.priority,
+      children: `Context: ${context.content}`
+    }));
+  });
+  
+  // User prompt with high priority
+  elements.push(UserMessage({
+    p: 9,
+    children: userPrompt
+  }));
+
+  return elements;
+}
 
 export class PlannerAgent {
   private ollamaEndpoint: string;
@@ -47,7 +100,17 @@ export class PlannerAgent {
   }
 
   async generatePlan(request: PlannerRequest): Promise<PlannerResponse> {
-    const prompt = PLANNER_TEMPLATE.replace("{PROMPT}", request.prompt);
+    // Use Priompt to render the prompt with priority-based token inclusion
+    const promptElement = PlannerPrompt({
+      userPrompt: request.prompt,
+      contextHistory: request.contextHistory || []
+    });
+    
+    const renderedPrompt = render(promptElement, {
+      tokenLimit: 4000 // Adjust based on your model's context limit
+    });
+    
+    const prompt = renderedPrompt.toString();
     
     try {
       const response = await fetch(`${this.ollamaEndpoint}/api/generate`, {

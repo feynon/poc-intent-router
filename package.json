@@ -6,11 +6,14 @@
   "scripts": {
     "dev": "bun --hot src/server.ts",
     "repl": "bun scripts/repl.ts",
-    "build": "bun build src/server.ts --outdir dist",
+    "build": "bun build src/server.ts --outdir dist --target bun",
     "start": "bun dist/server.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.3",
+    "@anysphere/priompt": "^0.2.1",
+    "@modelcontextprotocol/sdk": "^1.13.3",
+    "@modelcontextprotocol/server-filesystem": "^2025.7.1",
     "duckdb": "^1.1.3",
     "zod": "^3.22.4"
   },
