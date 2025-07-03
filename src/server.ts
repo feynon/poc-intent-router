@@ -33,13 +33,13 @@ export class AgentServer {
     // Initialize MCP agent
     this.mcpAgent = new MCPAgent(defaultMCPConfig);
     
-    // Use mock planner for demo since Ollama models are crashing
-    const useMockPlanner = process.env.USE_MOCK_PLANNER === "true" || true; // Force mock for demo
+    // Use mock planner for demo or when Ollama has issues
+    const useMockPlanner = process.env.USE_MOCK_PLANNER === "true";
     this.planner = useMockPlanner 
       ? new MockPlannerAgent()
       : new PlannerAgent(
           process.env.OLLAMA_ENDPOINT || "http://localhost:11434",
-          process.env.PLANNER_MODEL || "gemma3:latest"
+          process.env.PLANNER_MODEL || "qwen3:4b"
         );
     this.policy = new PolicyEngine();
     
@@ -50,7 +50,7 @@ export class AgentServer {
     
     this.executor = new ExecutorAgent(
       anthropicKey, 
-      process.env.EXECUTOR_MODEL || "claude-3-5-sonnet-20241022",
+      process.env.EXECUTOR_MODEL || "claude-sonnet-4-0",
       this.mcpAgent
     );
     this.initializeDatabase();
@@ -203,6 +203,10 @@ export class AgentServer {
       
       if (path === "/mcp/tools" && method === "GET") {
         return this.handleGetMCPTools();
+      }
+      
+      if (path === "/test/structured-outputs" && method === "POST") {
+        return this.handleTestStructuredOutputs(request);
       }
 
       return new Response("Not Found", { 
@@ -480,6 +484,92 @@ export class AgentServer {
     return new Response(JSON.stringify({ tools }), {
       headers: { "Content-Type": "application/json" },
     });
+  }
+
+  private async handleTestStructuredOutputs(request: Request): Promise<Response> {
+    try {
+      const body = await request.json();
+      const { prompt, contextHistory = [] } = body;
+
+      if (!prompt || typeof prompt !== "string") {
+        return new Response(JSON.stringify({ 
+          error: "Prompt is required and must be a string" 
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const startTime = Date.now();
+      
+      // Test planner health first
+      const plannerHealthy = await this.planner.healthCheck();
+      if (!plannerHealthy) {
+        return new Response(JSON.stringify({
+          error: "Planner service is not available",
+          suggestion: "Make sure Ollama is running and the model is pulled"
+        }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // Generate plan using structured outputs
+      const plannerRequest: PlannerRequest = {
+        prompt,
+        contextHistory
+      };
+
+      const plannerResponse = await this.planner.generatePlan(plannerRequest);
+      const duration = Date.now() - startTime;
+
+      // Validate with policy engine
+      const violations = await this.policy.validatePlan(
+        plannerResponse.plan,
+        [],
+        this.executor.getToolRegistry()
+      );
+
+      // Return comprehensive test results
+      return new Response(JSON.stringify({
+        test_metadata: {
+          timestamp: new Date().toISOString(),
+          duration_ms: duration,
+          ollama_structured_outputs: true,
+          validation_engine: "zod"
+        },
+        planner_response: {
+          plan_id: plannerResponse.plan.id,
+          confidence: plannerResponse.confidence,
+          steps_count: plannerResponse.plan.steps.length,
+          steps: plannerResponse.plan.steps
+        },
+        policy_validation: {
+          passed: violations.length === 0,
+          violations_count: violations.length,
+          violations: violations
+        },
+        json_schema_validation: {
+          valid: true, // If we got here, JSON schema validation passed
+          schema_enforced_by: "ollama-js structured outputs"
+        }
+      }), {
+        headers: { "Content-Type": "application/json" },
+      });
+
+    } catch (error) {
+      return new Response(JSON.stringify({
+        error: error instanceof Error ? error.message : "Test failed",
+        test_metadata: {
+          timestamp: new Date().toISOString(),
+          ollama_structured_outputs: true,
+          validation_engine: "zod"
+        }
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   }
 }
 

@@ -1,5 +1,6 @@
 import { PlannerRequest, PlannerResponse, Plan, Step, PlanSchema } from "./types.js";
 import { render, SystemMessage, UserMessage, PromptElement } from "@anysphere/priompt";
+import { Ollama } from "ollama";
 
 interface PlannerPromptProps {
   userPrompt: string;
@@ -41,15 +42,17 @@ function PlannerPrompt(props: PlannerPromptProps): PromptElement {
   elements.push(SystemMessage({
     p: 10,
     children: `You are a deterministic planning LLM inside an "agentic notebook".
-Output **only** JSON - an array of step objects with fields:
-  op          // snake_case verb
-  args        // arbitrary JSON-serializable payload
-  tool_caps   // array of required ToolCap IDs
-  data_caps   // array of required DataCap IDs (for consumed entities)
-  deps        // array of step indices this one depends on
+Output **only** valid JSON - an array of step objects with these exact fields:
+  "op": "string"          // snake_case verb like "create_file", "send_email", etc.
+  "args": {}              // object with operation parameters
+  "tool_caps": []         // array of required ToolCap IDs
+  "data_caps": []         // array of required DataCap IDs
+  "deps": []              // array of step indices this depends on
 
-IMPORTANT: Always respond with a JSON array starting with [ and ending with ]. Even for a single step, wrap it in an array.
-Example: [{"op":"create_document","args":{"title":"Hello","content":"Hello World"},"tool_caps":["WRITE_FILE"],"data_caps":["share_with:public"],"deps":[]}]`
+CRITICAL: Respond with ONLY a valid JSON array. No other text. Format:
+[{"op":"operation_name","args":{"key":"value"},"tool_caps":[],"data_caps":[],"deps":[]}]
+
+Example: [{"op":"create_file","args":{"path":"hello.txt","content":"Hello World"},"tool_caps":["WRITE_FILE"],"data_caps":["share_with:public"],"deps":[]}]`
   }));
   
   // Available operations
@@ -88,14 +91,14 @@ Example: [{"op":"create_document","args":{"title":"Hello","content":"Hello World
 }
 
 export class PlannerAgent {
-  private ollamaEndpoint: string;
+  private ollama: Ollama;
   private modelName: string;
 
   constructor(
     ollamaEndpoint: string = "http://localhost:11434",
-    modelName: string = "gemma3:latest"
+    modelName: string = "qwen3:4b"
   ) {
-    this.ollamaEndpoint = ollamaEndpoint;
+    this.ollama = new Ollama({ host: ollamaEndpoint });
     this.modelName = modelName;
   }
 
@@ -107,45 +110,74 @@ export class PlannerAgent {
     });
     
     const renderedPrompt = render(promptElement, {
-      tokenLimit: 4000 // Adjust based on your model's context limit
+      tokenLimit: 4000, // Adjust based on your model's context limit
+      tokenizer: {
+        numTokens: (text: string) => Math.ceil(text.length / 4) // Simple approximation
+      }
     });
     
     const prompt = renderedPrompt.toString();
     
-    try {
-      const response = await fetch(`${this.ollamaEndpoint}/api/generate`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+    // Define JSON schema for structured outputs
+    const schema = {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          op: {
+            type: "string",
+            description: "Operation name in snake_case"
+          },
+          args: {
+            type: "object",
+            description: "Operation arguments as key-value pairs"
+          },
+          tool_caps: {
+            type: "array",
+            items: { type: "string" },
+            description: "Required tool capabilities"
+          },
+          data_caps: {
+            type: "array", 
+            items: { type: "string" },
+            description: "Required data capabilities"
+          },
+          deps: {
+            type: "array",
+            items: { type: "number" },
+            description: "Dependencies on other step indices"
+          }
         },
-        body: JSON.stringify({
-          model: this.modelName,
-          prompt,
-          format: "json",
-          stream: false,
-        }),
+        required: ["op", "args", "tool_caps", "data_caps", "deps"],
+        additionalProperties: false
+      }
+    };
+
+    try {
+      const response = await this.ollama.generate({
+        model: this.modelName,
+        prompt,
+        format: schema,
+        stream: false,
+        options: {
+          temperature: 0.1, // Lower temperature for more deterministic planning
+        }
       });
 
-      if (!response.ok) {
-        throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data.response) {
+      if (!response.response) {
         throw new Error("No response from Ollama");
       }
 
       let steps: Step[];
       try {
-        const parsed = JSON.parse(data.response);
+        const parsed = JSON.parse(response.response);
         // Handle both single object and array responses
         steps = Array.isArray(parsed) ? parsed : [parsed];
       } catch (parseError) {
         throw new Error(`Failed to parse JSON response: ${parseError}`);
       }
 
-      // Validate the steps array
+      // Validate the steps array with Zod schema
       const validatedSteps = steps.map((step, index) => {
         try {
           return {
@@ -168,11 +200,11 @@ export class PlannerAgent {
         status: "pending",
       };
 
-      // Validate the entire plan
+      // Validate the entire plan with Zod
       PlanSchema.parse(plan);
 
       // Calculate confidence based on plan quality
-      const confidence = this.calculateConfidence(plan, data);
+      const confidence = this.calculateConfidence(plan, response);
 
       return {
         plan,
@@ -216,8 +248,8 @@ export class PlannerAgent {
 
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.ollamaEndpoint}/api/version`);
-      return response.ok;
+      await this.ollama.list();
+      return true;
     } catch {
       return false;
     }
@@ -225,12 +257,8 @@ export class PlannerAgent {
 
   async listModels(): Promise<string[]> {
     try {
-      const response = await fetch(`${this.ollamaEndpoint}/api/tags`);
-      if (!response.ok) {
-        return [];
-      }
-      const data = await response.json();
-      return data.models?.map((model: any) => model.name) || [];
+      const response = await this.ollama.list();
+      return response.models?.map((model: any) => model.name) || [];
     } catch {
       return [];
     }

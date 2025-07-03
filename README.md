@@ -37,7 +37,7 @@ brew install bun duckdb ollama
 
 ### 2. Pull the planning model (Qwen-3-4B)
 ```bash
-ollama pull qwen:3-4b
+ollama run qwen3:4b
 ```
 
 ### 3. Clone and set up the project
@@ -48,13 +48,24 @@ bun install
 cp .env.example .env   # See below for required env vars
 ```
 
+### Dependencies
+
+Key dependencies in this project:
+
+- **ollama** (v0.5.16) - Official Ollama JavaScript library with structured outputs support
+- **@anthropic-ai/sdk** - Anthropic Claude API client
+- **@anysphere/priompt** - Priority-based prompt composition
+- **@modelcontextprotocol/sdk** - MCP integration for extensible tools
+- **duckdb** - In-process analytics database
+- **zod** - TypeScript-first schema validation
+
 ### 4. Configure environment variables
 Create a `.env` file with at least:
 ```
 ANTHROPIC_API_KEY=sk-ant-...   # Your Anthropic Claude API key
-EXECUTOR_MODEL=claude-3-5-sonnet-20241022  # (optional, default shown)
+EXECUTOR_MODEL=claude-sonnet-4-0  # (optional, default shown)
 OLLAMA_ENDPOINT=http://localhost:11434      # (optional, default shown)
-PLANNER_MODEL=qwen:3-4b                     # (optional, default shown)
+PLANNER_MODEL=qwen3:4b                     # (optional, default shown)
 USE_MOCK_PLANNER=false                      # (optional, for demo/testing)
 ```
 
@@ -86,9 +97,10 @@ bun run scripts/repl.ts
 
 ## Architecture
 
-- **Planner Agent**: Local LLM (Qwen-3-4B via Ollama) parses user prompts into deterministic JSON plans using **Priompt** for intelligent prompt composition.
+- **Planner Agent**: Local LLM (Qwen-3-4B via Ollama) parses user prompts into deterministic JSON plans using **ollama-js** with structured outputs and **Priompt** for intelligent prompt composition.
 - **Policy Engine**: TypeScript in-proc, enforces CaMeL-style capability checks before every tool call.
 - **Executor Agent**: Remote LLM (Claude Sonnet 4 via Anthropic API) executes high-cost reasoning and tool commands with **Priompt**-optimized prompts.
+- **MCP Agent**: Model Context Protocol integration for extensible tool capabilities via filesystem and other MCP servers.
 - **Embedding Agent**: (Planned) Uses OpenAI text-embedding-3-small for 384-dim vectors.
 - **Indexer**: DuckDB with HNSW and property-graph extensions for hybrid vector + symbolic search.
 
@@ -196,8 +208,63 @@ See [`database/schema.sql`](./database/schema.sql) for the full DDL. The ER diag
 - `GET /entities` — List all entities
 - `GET /events` — List all events
 - `GET /health` — Health check
+- `POST /test/structured-outputs` — Test structured outputs functionality
+- `GET /mcp/servers` — List MCP servers
+- `POST /mcp/servers` — Add MCP server
+- `GET /mcp/tools` — List available MCP tools
 
 See `src/server.ts` for implementation details.
+
+---
+
+## Structured Outputs with Ollama
+
+This project implements **Ollama's structured outputs feature** for guaranteed JSON compliance in plan generation. The planner agent uses the **ollama-js** library to enforce JSON schema validation at generation time.
+
+### Key Features
+
+- **Schema Enforcement**: JSON structure is validated by Ollama during generation
+- **Type Safety**: Zod schemas provide runtime validation and TypeScript types
+- **Error Prevention**: Eliminates JSON parsing errors and malformed responses
+- **Performance**: Reduces token usage by eliminating format instructions
+- **Reliability**: Guarantees consistent JSON structure across all model responses
+
+### Implementation
+
+The planner uses a JSON schema to enforce the step structure:
+
+```typescript
+const schema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      op: { type: "string", description: "Operation name in snake_case" },
+      args: { type: "object", description: "Operation arguments" },
+      tool_caps: { type: "array", items: { type: "string" } },
+      data_caps: { type: "array", items: { type: "string" } },
+      deps: { type: "array", items: { type: "number" } }
+    },
+    required: ["op", "args", "tool_caps", "data_caps", "deps"]
+  }
+};
+
+const response = await ollama.generate({
+  model: "qwen3:4b",
+  prompt: userPrompt,
+  format: schema,  // Structured outputs enforcement
+  stream: false
+});
+```
+
+### Testing
+
+Multiple test suites validate the structured outputs implementation:
+
+- **CLI Testing**: `bun run test:cli` - Direct agent testing with real-time feedback
+- **App Testing**: `bun run test:app` - Full end-to-end API validation
+- **JSON Validation**: `bun run test:json` - Comprehensive schema compliance testing
+- **Debug Mode**: `bun run debug-structured-outputs.ts` - Raw response inspection
 
 ---
 

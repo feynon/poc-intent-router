@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { MCPAgent, defaultMCPConfig } from "./agents/mcp-agent.js";
+import { MCPAgent, defaultMCPConfig } from "../agents/mcp-agent.js";
 
 async function testMCPIntegration() {
   console.log("🧪 Testing MCP Integration...");

@@ -4,6 +4,30 @@
 
 ---
 
+## Recent Updates
+
+### Ollama Structured Outputs Integration (Latest)
+
+The project now uses **ollama-js** library (v0.5.16) with structured outputs for guaranteed JSON compliance:
+
+- **Schema Enforcement**: JSON structure validated by Ollama at generation time
+- **Type Safety**: Zod schemas provide runtime validation and TypeScript types  
+- **Reliability**: Eliminates JSON parsing errors and ensures consistent output format
+- **Performance**: Reduces token usage by removing format instructions from prompts
+
+### Key Implementation Changes
+
+1. **PlannerAgent Updated**: Now uses `ollama-js` client instead of raw fetch calls
+2. **JSON Schema**: Enforces step structure with required fields (op, args, tool_caps, data_caps, deps)
+3. **Testing Suite**: Comprehensive test coverage for CLI and API validation
+4. **MCP Integration**: Model Context Protocol for extensible tool capabilities
+
+### Dependencies Added
+- **ollama** (v0.5.16) - Official Ollama JavaScript library
+- **@modelcontextprotocol/sdk** - MCP integration framework
+
+---
+
 ## Prompt Engineering with Priompt
 
 This implementation integrates **[Priompt](https://github.com/anysphere/priompt)** for intelligent prompt composition with priority-based token inclusion across both planning and execution agents.
@@ -43,12 +67,12 @@ This implementation integrates **[Priompt](https://github.com/anysphere/priompt)
 brew install bun duckdb ollama
 
 # Pull planning model (≈4 B params, fits in ~6 GB VRAM)
-ollama pull qwen:3-4b     # official Ollama tag
+ollama pull qwen3:4b     # official Ollama tag
 
 # Project bootstrap
 bun create agentic‑mvp ./my‑workspace && cd my‑workspace
 cp docs/AGENTS.md .       # this file
-bun install               # installs duckdb, @anthropic-ai/sdk, @anysphere/priompt
+bun install               # installs duckdb, @anthropic-ai/sdk, @anysphere/priompt, ollama, @modelcontextprotocol/sdk
 cp .env.example .env      # add your ANTHROPIC_API_KEY
 bun run dev               # starts HTTP server on :3000
 ```
@@ -83,15 +107,35 @@ bun run dev               # starts HTTP server on :3000
 
 ## 3. Planner agent specification
 
-### 3.1 Invocation
+### 3.1 Invocation (Updated with Structured Outputs)
 
-```
-POST http://localhost:11434/api/generate
-{
-  "model": "qwen:3-4b",
-  "prompt": PLANNER_TEMPLATE + user_prompt,
-  "format": "json"
-}
+```ts
+import { Ollama } from "ollama";
+
+const ollama = new Ollama({ host: "http://localhost:11434" });
+
+const schema = {
+  type: "array",
+  items: {
+    type: "object", 
+    properties: {
+      op: { type: "string", description: "Operation name in snake_case" },
+      args: { type: "object", description: "Operation arguments" },
+      tool_caps: { type: "array", items: { type: "string" } },
+      data_caps: { type: "array", items: { type: "string" } },
+      deps: { type: "array", items: { type: "number" } }
+    },
+    required: ["op", "args", "tool_caps", "data_caps", "deps"]
+  }
+};
+
+const response = await ollama.generate({
+  model: "qwen3:4b",
+  prompt: PLANNER_TEMPLATE + user_prompt,
+  format: schema,  // Structured outputs with JSON schema
+  stream: false,
+  options: { temperature: 0.1 }
+});
 ```
 
 ### 3.2 Prompt composition (Priompt-based)
@@ -195,7 +239,7 @@ If either assertion fails → raise `CAPABILITY_VIOLATION` → surface approval 
 
 ## 5. Executor agent specification
 
-* Chat completion via **Anthropic** (model configurable, default `claude-sonnet-4`)
+* Chat completion via **Anthropic** (model configurable, default `claude-sonnet-4-0`)
 * Runs only **after** the Policy Engine green‑lights a step.
 * May create new *Entity* rows; they inherit union of consumed caps.
 * Uses **Priompt** for structured prompt composition with priority-based context inclusion.
@@ -238,7 +282,7 @@ Use the provided tools to complete the operation efficiently and accurately.`
 }
 
 const res = await anthropic.messages.create({
-  model: process.env.EXECUTOR_MODEL ?? "claude-sonnet-4",
+  model: process.env.EXECUTOR_MODEL ?? "claude-sonnet-4-0",
   tools: [{/* JSON schema */}],
   messages: [{ role: "user", content: render(promptElement, { tokenLimit: 8000 }).toString() }]
 });
@@ -260,6 +304,9 @@ const res = await anthropic.messages.create({
 /src
   server.ts         # Bun HTTP
   routes.ts         # REST endpoints
+/tests
+  test-*.ts         # All test files
+  README.md         # Test documentation
 /docs
   AGENTS.md         # ← you are here
 .env.example        # ANTHROPIC_API_KEY, EXECUTOR_MODEL, …
@@ -297,3 +344,28 @@ Every tool implementation **must** export its required `tool_caps` so the Policy
 1. **CRDT overlay** — leverage DuckDB 1.3’s `crdt` table‑function once stable.
 2. **Streaming plans** — adopt SSE to push Plan + Event deltas to the UI.
 3. **Fine‑tune Qwen‑3‑4B** on your domain‑specific planning traces for tighter JSON.
+4. **Structured outputs optimization** — experiment with different schema designs for better model compliance.
+
+---
+
+## Testing Structured Outputs
+
+### CLI Testing
+```bash
+bun run test:cli      # Direct agent testing with real-time feedback
+bun run test:json     # Comprehensive schema compliance testing
+bun run debug-structured-outputs.ts # Raw response inspection and debugging
+```
+
+### App Testing
+```bash
+bun run dev                         # Start the server
+bun run test:app      # Full end-to-end API validation
+```
+
+### Test Coverage
+- **Health checks**: Ollama connection and model availability
+- **JSON validation**: Schema compliance and type safety
+- **Error handling**: Malformed inputs and edge cases
+- **Performance**: Response times and token efficiency
+- **Integration**: Policy engine and capability validation

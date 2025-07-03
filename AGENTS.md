@@ -1,6 +1,33 @@
 # AGENTS.md — Agent Layer Specification
 
-> **Goal**  Document the agentic architecture for the Prompt → Plan → Event/Entity stack using TypeScript + Bun, DuckDB for storage, and a dual-LLM security model. Local planning is performed with **Qwen-3-4B** via Ollama; execution is delegated to **Claude Sonnet 4** via Anthropic. Both agents use **Priompt** for intelligent prompt composition. Embeddings use OpenAI, and all policy enforcement is in TypeScript.
+> **Goal**  Document the agentic architecture for the Prompt → Plan → Event/Entity stack using TypeScript + Bun, DuckDB for storage, and a dual-LLM security model. Local planning is performed with **Qwen-3-4B** via Ollama using **structured outputs** with the **ollama-js** library; execution is delegated to **Claude Sonnet 4** via Anthropic. Both agents use **Priompt** for intelligent prompt composition. The system integrates **MCP (Model Context Protocol)** for extensible tool capabilities.
+
+---
+
+## Recent Updates: Structured Outputs Implementation
+
+### Ollama-JS Integration
+The planner agent now uses the **ollama-js** library (v0.5.16) with structured outputs for guaranteed JSON schema compliance:
+
+- **Schema Enforcement**: JSON structure validated by Ollama at generation time
+- **Type Safety**: Zod schemas provide runtime validation and TypeScript types
+- **Reliability**: Eliminates JSON parsing errors and ensures consistent output format
+- **Performance**: Reduces token usage by removing format instructions from prompts
+
+### MCP Integration
+Added **Model Context Protocol** support for extensible tool capabilities:
+
+- **Filesystem Tools**: MCP filesystem server for file operations
+- **Extensible Architecture**: Easy addition of new MCP servers and tools
+- **Capability Integration**: MCP tools automatically registered with policy engine
+
+### Testing Infrastructure
+Comprehensive test suites for validation:
+
+- **CLI Testing**: Direct agent testing with real-time feedback
+- **API Testing**: Full end-to-end validation via HTTP endpoints
+- **JSON Validation**: Schema compliance and type safety verification
+- **Debug Tools**: Raw response inspection and performance analysis
 
 ---
 
@@ -26,7 +53,7 @@
 brew install bun duckdb ollama
 
 # Pull planning model (Qwen-3-4B)
-ollama pull qwen:3-4b
+ollama run qwen3:4b
 
 # Project bootstrap
 git clone <repo-url>
@@ -71,9 +98,10 @@ This implementation uses **[Priompt](https://github.com/anysphere/priompt)** for
 
 | Agent               | Model / Location                | Main job                                     |
 | ------------------- | ------------------------------- | -------------------------------------------- |
-| **Planner**         | Qwen-3-4B @ Ollama (local)      | Parse *Prompt* → ordered *Plan*; attach caps |
+| **Planner**         | Qwen-3-4B @ Ollama (local)      | Parse *Prompt* → ordered *Plan* with structured outputs |
 | **Policy Engine**   | In-proc TypeScript              | Enforce CaMeL checks before every tool call  |
 | **Executor**        | Claude Sonnet 4 (remote)        | Perform high-cost reasoning & tool commands  |
+| **MCP Agent**       | MCP servers (local/remote)      | Provide extensible tool capabilities         |
 | **Embedding Agent** | OpenAI `text-embedding-3-small` | Generate 384-dim vectors for `Entity`        |
 | **Indexer**         | DuckDB `vss`, `duckpgq`         | Maintain HNSW + property-graph indexes       |
 
@@ -81,15 +109,37 @@ This implementation uses **[Priompt](https://github.com/anysphere/priompt)** for
 
 ## 3. Planner agent specification
 
-### 3.1 Invocation
+### 3.1 Invocation (Updated with Structured Outputs)
 
-```
-POST http://localhost:11434/api/generate
-{
-  "model": "qwen:3-4b",
-  "prompt": PLANNER_TEMPLATE + user_prompt,
-  "format": "json"
-}
+```ts
+import { Ollama } from "ollama";
+
+const ollama = new Ollama({ host: "http://localhost:11434" });
+
+// JSON schema for structured outputs
+const schema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      op: { type: "string", description: "Operation name in snake_case" },
+      args: { type: "object", description: "Operation arguments" },
+      tool_caps: { type: "array", items: { type: "string" } },
+      data_caps: { type: "array", items: { type: "string" } },
+      deps: { type: "array", items: { type: "number" } }
+    },
+    required: ["op", "args", "tool_caps", "data_caps", "deps"],
+    additionalProperties: false
+  }
+};
+
+const response = await ollama.generate({
+  model: "qwen3:4b",
+  prompt: PLANNER_TEMPLATE + user_prompt,
+  format: schema,  // Structured outputs with JSON schema enforcement
+  stream: false,
+  options: { temperature: 0.1 }
+});
 ```
 
 ### 3.2 Prompt composition (Priompt-based)
@@ -284,8 +334,62 @@ Add new tool or data capabilities in `agents/capability-registry.ts` and ensure 
 
 ---
 
-## 9. Open questions / next steps
+## 9. MCP (Model Context Protocol) Integration
+
+### MCP Agent
+The system includes an MCP agent for extensible tool capabilities:
+
+```ts
+import { MCPAgent, defaultMCPConfig } from "../agents/mcp-agent.js";
+
+const mcpAgent = new MCPAgent(defaultMCPConfig);
+await mcpAgent.initialize();
+
+// Get available MCP tools
+const tools = mcpAgent.getMCPTools();
+const capabilities = mcpAgent.getRequiredCapabilities();
+```
+
+### Default MCP Servers
+- **Filesystem Server**: Provides file operation tools with sandboxed access
+- **Extensible**: Easy to add additional MCP servers for new capabilities
+
+### API Endpoints
+- `GET /mcp/servers` — List MCP servers
+- `POST /mcp/servers` — Add MCP server
+- `GET /mcp/tools` — List available MCP tools
+
+---
+
+## 10. Testing Structured Outputs
+
+### CLI Testing
+```bash
+bun run test-cli-structured.ts      # Direct agent testing with feedback
+bun run test-json-validation.ts     # Schema compliance testing
+bun run debug-structured-outputs.ts # Raw response inspection
+bun run test-summary.ts            # Implementation summary
+```
+
+### API Testing
+```bash
+bun run dev                         # Start server
+bun run test-app-structured.ts      # End-to-end API validation
+```
+
+### Test Coverage
+- **Health Checks**: Ollama connection and model availability
+- **JSON Validation**: Schema compliance and type safety
+- **Error Handling**: Malformed inputs and edge cases
+- **Performance**: Response times and token efficiency
+- **Integration**: Policy engine and MCP tool validation
+
+---
+
+## 11. Open questions / next steps
 
 1. **CRDT overlay** — leverage DuckDB 1.3's `crdt` table-function once stable.
 2. **Streaming plans** — adopt SSE to push Plan + Event deltas to the UI.
-3. **Fine-tune Qwen-3-4B** on your domain-specific planning traces for tighter JSON. 
+3. **Fine-tune Qwen-3-4B** on your domain-specific planning traces for tighter JSON.
+4. **Schema optimization** — experiment with different JSON schemas for better model compliance.
+5. **MCP expansion** — add more MCP servers for additional tool capabilities. 

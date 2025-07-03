@@ -17,7 +17,7 @@ export class ExecutorAgent {
   private model: string;
   private mcpAgent?: MCPAgent;
 
-  constructor(apiKey: string, model: string = "claude-3-5-sonnet-20241022", mcpAgent?: MCPAgent) {
+  constructor(apiKey: string, model: string = "claude-sonnet-4-0", mcpAgent?: MCPAgent) {
     this.anthropic = new Anthropic({ apiKey });
     this.model = model;
     this.mcpAgent = mcpAgent;

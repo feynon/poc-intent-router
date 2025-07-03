@@ -1,0 +1,12 @@
+[
+  {
+    "op": "create_file",
+    "args": {
+      "path": "hello.txt",
+      "content": "Hello, world!"
+    },
+    "tool_caps": [],
+    "data_caps": [],
+    "deps": []
+  }
+]
