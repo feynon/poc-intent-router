@@ -1,16 +1,77 @@
 import { Plan, Step, Entity, Capability, PolicyViolation } from "./types.js";
+import { Database } from "duckdb";
 
 export class PolicyEngine {
   private capabilities: Map<string, Capability> = new Map();
+  private db?: Database;
 
-  constructor(capabilities: Capability[] = []) {
+  constructor(capabilities: Capability[] = [], db?: Database) {
+    this.db = db;
     for (const cap of capabilities) {
       this.capabilities.set(cap.id, cap);
     }
   }
 
-  addCapability(capability: Capability): void {
+  setDatabase(db: Database): void {
+    this.db = db;
+  }
+
+  async addCapability(capability: Capability, persist: boolean = true): Promise<void> {
+    // Add to in-memory cache
     this.capabilities.set(capability.id, capability);
+    
+    // Persist to database if requested and database is available
+    if (persist && this.db) {
+      try {
+        await this.persistCapability(capability);
+      } catch (error) {
+        console.error(`Failed to persist capability ${capability.id}:`, error);
+        // Remove from cache if persistence failed
+        this.capabilities.delete(capability.id);
+        throw error;
+      }
+    }
+  }
+
+  async removeCapability(id: string): Promise<boolean> {
+    const existed = this.capabilities.has(id);
+    
+    // Remove from in-memory cache
+    this.capabilities.delete(id);
+    
+    // Remove from database if it exists
+    if (this.db) {
+      try {
+        this.db.run("DELETE FROM capabilities WHERE id = ?", id);
+      } catch (error) {
+        console.error(`Failed to remove capability ${id} from database:`, error);
+        // Don't throw here as the in-memory removal was successful
+      }
+    }
+    
+    return existed;
+  }
+
+  async updateCapability(capability: Capability): Promise<void> {
+    // Update in-memory cache
+    this.capabilities.set(capability.id, capability);
+    
+    // Update in database
+    if (this.db) {
+      try {
+        this.db.run(
+          "UPDATE capabilities SET kind = ?, scope = ?, description = ?, updated_at = CURRENT_TIMESTAMP, metadata = ? WHERE id = ?",
+          capability.kind,
+          capability.scope,
+          capability.description || null,
+          JSON.stringify((capability as any).metadata || {}),
+          capability.id
+        );
+      } catch (error) {
+        console.error(`Failed to update capability ${capability.id}:`, error);
+        throw error;
+      }
+    }
   }
 
   getCapability(id: string): Capability | undefined {
@@ -19,6 +80,83 @@ export class PolicyEngine {
 
   listCapabilities(): Capability[] {
     return Array.from(this.capabilities.values());
+  }
+
+  async loadCapabilitiesFromDatabase(): Promise<void> {
+    if (!this.db) {
+      console.warn("No database connection available for loading capabilities");
+      return;
+    }
+
+    try {
+      const rows = this.db.all("SELECT * FROM capabilities ORDER BY created_at");
+      
+      if (rows && Array.isArray(rows)) {
+        for (const row: any of rows) {
+          const capability: Capability = {
+            id: row.id,
+            kind: row.kind as "ToolCap" | "DataCap",
+            scope: row.scope,
+            description: row.description
+          };
+          
+          // Add metadata if it exists
+          if (row.metadata) {
+            try {
+              const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+              (capability as any).metadata = metadata;
+            } catch (e) {
+              console.warn(`Failed to parse metadata for capability ${row.id}`);
+            }
+          }
+          
+          // Add system flag if it exists
+          if (row.is_system !== undefined) {
+            (capability as any).is_system = row.is_system;
+          }
+          
+          // Add timestamps if they exist
+          if (row.created_at) {
+            (capability as any).created_at = row.created_at;
+          }
+          if (row.updated_at) {
+            (capability as any).updated_at = row.updated_at;
+          }
+          
+          // Add to in-memory cache (without persistence to avoid loops)
+          this.capabilities.set(capability.id, capability);
+        }
+        
+        console.log(`📋 Loaded ${rows.length} capabilities from database`);
+      }
+    } catch (error) {
+      console.error("Failed to load capabilities from database:", error);
+      throw error;
+    }
+  }
+
+  private async persistCapability(capability: Capability): Promise<void> {
+    if (!this.db) {
+      throw new Error("No database connection available");
+    }
+
+    const isSystem = (capability as any).is_system || false;
+    const metadata = JSON.stringify((capability as any).metadata || {});
+
+    try {
+      this.db.run(
+        "INSERT OR REPLACE INTO capabilities (id, kind, scope, description, is_system, metadata, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        capability.id,
+        capability.kind,
+        capability.scope,
+        capability.description || null,
+        isSystem,
+        metadata
+      );
+    } catch (error) {
+      console.error(`Failed to persist capability ${capability.id}:`, error);
+      throw error;
+    }
   }
 
   async validatePlan(
@@ -228,12 +366,30 @@ export class PolicyEngine {
     };
   }
 
+  async validateStep(
+    step: Step,
+    entities: Entity[] = []
+  ): Promise<PolicyViolation[]> {
+    const violations: PolicyViolation[] = [];
+    const entityMap = new Map(entities.map(e => [e.id, e]));
+
+    // Validate tool capabilities
+    const toolViolations = this.validateToolCapabilities(step, 0, {});
+    violations.push(...toolViolations);
+
+    // Validate data capabilities
+    const dataViolations = await this.validateDataCapabilities(step, 0, entityMap);
+    violations.push(...dataViolations);
+
+    return violations;
+  }
+
   createApprovalContext(violations: PolicyViolation[]): {
     summary: string;
     details: PolicyViolation[];
     requiresUserApproval: boolean;
   } {
-    const hasCriticalViolations = violations.some(v => 
+    const hasCriticalViolations = violations.some((v: PolicyViolation) => 
       v.violation_type === "missing_tool_cap" || 
       v.violation_type === "missing_data_cap"
     );

@@ -9,6 +9,8 @@ export interface MCPAgentConfig {
 export class MCPAgent {
   private mcpClient: MCPClient;
   private isInitialized: boolean = false;
+  private initializationErrors: Map<string, string> = new Map();
+  private serverStatuses: Map<string, 'connecting' | 'connected' | 'failed' | 'disconnected'> = new Map();
 
   constructor(private config: MCPAgentConfig) {
     this.mcpClient = new MCPClient();
@@ -20,26 +22,70 @@ export class MCPAgent {
     }
 
     console.log("🚀 Initializing MCP Agent...");
+    this.initializationErrors.clear();
     
-    for (const serverConfig of this.config.servers) {
+    const initPromises = this.config.servers.map(async (serverConfig) => {
       try {
+        this.serverStatuses.set(serverConfig.name, 'connecting');
         await this.mcpClient.addServer(serverConfig);
+        this.serverStatuses.set(serverConfig.name, 'connected');
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.initializationErrors.set(serverConfig.name, errorMessage);
+        this.serverStatuses.set(serverConfig.name, 'failed');
         console.error(`Failed to add MCP server ${serverConfig.name}:`, error);
         // Continue with other servers even if one fails
       }
-    }
+    });
+
+    // Wait for all initialization attempts to complete
+    await Promise.allSettled(initPromises);
 
     this.isInitialized = true;
-    console.log("✅ MCP Agent initialized");
+    
+    const successCount = this.config.servers.length - this.initializationErrors.size;
+    const totalCount = this.config.servers.length;
+    
+    if (this.initializationErrors.size > 0) {
+      console.log(`⚠️  MCP Agent initialized with ${successCount}/${totalCount} servers successful`);
+      console.log("Failed servers:", Array.from(this.initializationErrors.keys()));
+    } else {
+      console.log(`✅ MCP Agent initialized successfully (${successCount}/${totalCount} servers)`);
+    }
   }
 
   async addServer(config: MCPServerConfig): Promise<void> {
-    await this.mcpClient.addServer(config);
+    try {
+      this.serverStatuses.set(config.name, 'connecting');
+      await this.mcpClient.addServer(config);
+      this.serverStatuses.set(config.name, 'connected');
+      
+      // Remove from initialization errors if it was previously failed
+      if (this.initializationErrors.has(config.name)) {
+        this.initializationErrors.delete(config.name);
+      }
+      
+    } catch (error) {
+      this.serverStatuses.set(config.name, 'failed');
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.initializationErrors.set(config.name, errorMessage);
+      throw error;
+    }
   }
 
   async removeServer(serverName: string): Promise<void> {
-    await this.mcpClient.removeServer(serverName);
+    try {
+      this.serverStatuses.set(serverName, 'disconnected');
+      await this.mcpClient.removeServer(serverName);
+      
+      // Clean up tracking data
+      this.serverStatuses.delete(serverName);
+      this.initializationErrors.delete(serverName);
+      
+    } catch (error) {
+      this.serverStatuses.set(serverName, 'failed');
+      throw error;
+    }
   }
 
   getAvailableTools(): ToolDefinition[] {
@@ -63,7 +109,35 @@ export class MCPAgent {
     if (!this.isInitialized) {
       return false;
     }
-    return await this.mcpClient.healthCheck();
+    
+    try {
+      const result = await this.mcpClient.healthCheck();
+      
+      // Update server statuses based on health check
+      for (const serverName of this.getServerNames()) {
+        const currentStatus = this.serverStatuses.get(serverName);
+        if (currentStatus === 'connected') {
+          // Keep as connected if health check passes
+          continue;
+        } else if (currentStatus === 'failed') {
+          // Try to re-establish connection status if health check passes overall
+          if (result) {
+            this.serverStatuses.set(serverName, 'connected');
+          }
+        }
+      }
+      
+      return result;
+    } catch (error) {
+      console.error("Health check failed:", error);
+      
+      // Mark all servers as failed if health check fails
+      for (const serverName of this.getServerNames()) {
+        this.serverStatuses.set(serverName, 'failed');
+      }
+      
+      return false;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -92,6 +166,50 @@ export class MCPAgent {
   // Get connected server names
   getServerNames(): string[] {
     return this.mcpClient.getServerNames();
+  }
+
+  // Get server status information
+  getServerStatus(serverName: string): 'connecting' | 'connected' | 'failed' | 'disconnected' | 'unknown' {
+    return this.serverStatuses.get(serverName) || 'unknown';
+  }
+
+  // Get all server statuses
+  getAllServerStatuses(): Map<string, 'connecting' | 'connected' | 'failed' | 'disconnected'> {
+    return new Map(this.serverStatuses);
+  }
+
+  // Get initialization errors
+  getInitializationErrors(): Map<string, string> {
+    return new Map(this.initializationErrors);
+  }
+
+  // Get detailed health status
+  getDetailedStatus(): {
+    isInitialized: boolean;
+    totalServers: number;
+    connectedServers: number;
+    failedServers: number;
+    serverDetails: Array<{
+      name: string;
+      status: string;
+      error?: string;
+      toolCount?: number;
+    }>;
+  } {
+    const serverDetails = Array.from(this.serverStatuses.entries()).map(([name, status]) => ({
+      name,
+      status,
+      error: this.initializationErrors.get(name),
+      toolCount: this.getMCPTools().filter(tool => tool.server_name === name).length
+    }));
+
+    return {
+      isInitialized: this.isInitialized,
+      totalServers: this.serverStatuses.size,
+      connectedServers: Array.from(this.serverStatuses.values()).filter(s => s === 'connected').length,
+      failedServers: Array.from(this.serverStatuses.values()).filter(s => s === 'failed').length,
+      serverDetails
+    };
   }
 }
 
